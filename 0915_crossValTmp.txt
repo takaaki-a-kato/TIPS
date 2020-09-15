@@ -1,0 +1,316 @@
+¶ 4 パイプライン
+＃まだどういうものかイメージがついてないけどすごく便利そう
+いちいちデータにあわせて書くの結構メンドウだし、コピペも多いとは言え。
+
+パイプラインは、データの前処理とモデリングのコードを整理しておくためのシンプルな方法です。
+具体的には、パイプラインは前処理とモデリングのステップをバンドルしているので、
+バンドル全体をあたかも単一のステップであるかのように使用できます。
+
+メリット
+1.よりクリーンなコード 前処理の各ステップでデータを会計処理するのは面倒です。パイプラインがあれば、各ステップでトレーニングデータとバリデーションデータを手動で管理する必要はありません。
+
+2.バグの減少。 ステップを誤って適用したり、前処理ステップを忘れたりする機会が少なくなります。
+
+3.プロダクション化が容易になります。 モデルをプロトタイプからスケールで展開可能なものに移行するのは驚くほど難しいことです。ここでは関連する多くの懸念事項については触れませんが、パイプラインが役立ちます。
+
+4.モデル検証のためのより多くのオプション。 次のチュートリアルでクロスバリデーションの例を見ます。
+
+説明では、
+使うのはメルボルンの住宅データ。
+欠損もあるし、カテゴリ値もある。
+
+パイプラインを３つの手順で構築していく。
+
+ステップ1：前処理ステップの定義
+　異なる前処理を束ねる。ColumnTransformerクラスを使う。
+　・数値カラムの欠損値埋め
+　・カテゴリ値カラムの欠損値埋め＆One-hotエンコ
+
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import OneHotEncoder
+
+# Preprocessing for numerical data
+# ・数値カラムの欠損値埋めのためのSimpleImputer(定数で埋める)
+numerical_transformer = SimpleImputer(strategy='constant')
+
+# Preprocessing for categorical data
+# カテゴリ値カラムの、
+# ・欠損値埋めのためのSimpleImputer(最頻値で埋める)
+# ・OneHotエンコのためのOneHotEncoder
+# 　(handle_unknown=ignoreで訓練にあって、検証にないバリエ値は無視)
+# をPipeLineで、カテゴリ値用パイプライン”categorical_transformer ”として1本化
+categorical_transformer = Pipeline(steps=[
+    ('imputer', SimpleImputer(strategy='most_frequent')),
+    ('onehot', OneHotEncoder(handle_unknown='ignore'))
+])
+
+# Bundle preprocessing for numerical and categorical data
+# さらに、それら(数値列のImputer と　”categorical_transformer ”)を
+# ColumnTransformerでバンドル
+# ※ColumnTransformerを使うと、
+# 列ごと（特徴量ごと）に異なった操作を適用するという変換を行うことができます
+preprocessor = ColumnTransformer(
+    transformers=[
+        ('num', numerical_transformer, numerical_cols),
+        ('cat', categorical_transformer, categorical_cols)
+    ])
+
+ステップ2: モデルの定義
+次に、おなじみのRandomForestRegressorクラスを用いてランダムフォレストモデルを定義します。
+from sklearn.ensemble import RandomForestRegressor
+model = RandomForestRegressor(n_estimators=100, random_state=0)
+
+ステップ3：パイプラインの作成と評価
+最後に、パイプラインクラスを使用して、
+前処理とモデリングのステップを束ねたパイプラインを定義します。
+ 注意すべき重要な点がいくつかあります。
+
+・パイプラインでは、学習データの前処理とモデルの適合を 1 行のコードで行います。
+　(パイプラインがない場合は、欠損値埋め、ワンホット・エンコーディング、
+　モデル・トレーニングを別々のステップで行わなければなりません。
+　数値変数とカテゴリカル変数の両方を扱う必要がある場合、これは特に面倒になります。)
+
+・パイプラインでは、X_valid の未処理の特徴量を predict() コマンドに与えると、
+　予測値を生成する前にパイプラインが自動的に特徴量を前処理する。
+　(ただし、パイプラインを使用しない場合は、
+　予測を行う前に検証データを前処理することを忘れないようにしなければなりません)。
+
+from sklearn.metrics import mean_absolute_error
+
+# Bundle preprocessing and modeling code in a pipeline
+# ・preprocessorが手順１で作成した数値＆カテゴリ値の前処理のまとめ
+# ・modelが手順２で作成したモデル(学習前)
+#　この２つをPipelineクラスでバンドルする
+my_pipeline = Pipeline(steps=[('preprocessor', preprocessor),
+                              ('model', model)
+                             ])
+
+# Preprocessing of training data, fit model 
+# 訓練データの前処理と学習を同時に実施
+my_pipeline.fit(X_train, y_train)
+
+# Preprocessing of validation data, get predictions
+# 検証データの前処理と予測を同時に実施
+preds = my_pipeline.predict(X_valid)
+
+# Evaluate the model
+score = mean_absolute_error(y_valid, preds)
+print('MAE:', score)
+
+
+★整理まとめ
+#### データ準備
+import pandas as pd
+from sklearn.model_selection import train_test_split
+
+# Read the data
+# 訓練フル
+X_full = pd.read_csv('../input/train.csv', index_col='Id')
+# テスト
+X_test_full = pd.read_csv('../input/test.csv', index_col='Id')
+
+# Remove rows with missing target, separate target from predictors
+# 訓練フルから目的変数が欠損しているレコードは削除して、説明変数X_full と 目的変数y　に分ける
+X_full.dropna(axis=0, subset=['SalePrice'], inplace=True)
+y = X_full.SalePrice
+X_full.drop(['SalePrice'], axis=1, inplace=True)
+
+# Break off validation set from training data
+# 訓練フル(説明変数X_full と 目的変数y) を 訓練用と検証用に分割
+X_train_full, X_valid_full, y_train, y_valid = train_test_split(X_full, y, 
+                                                                train_size=0.8, test_size=0.2,
+                                                                random_state=0)
+
+# "Cardinality" means the number of unique values in a column
+# Select categorical columns with relatively low cardinality (convenient but arbitrary)
+# カーディナリティが低い(バリエーション10未満)、オブジェクト型の列を、カテゴリ列群として抽出しておく
+categorical_cols = [cname for cname in X_train_full.columns if
+                    X_train_full[cname].nunique() < 10 and 
+                    X_train_full[cname].dtype == "object"]
+
+# Select numerical columns
+# 数値の列は、数値列群として抽出しておく
+numerical_cols = [cname for cname in X_train_full.columns if 
+                X_train_full[cname].dtype in ['int64', 'float64']]
+
+# Keep selected columns only
+my_cols = categorical_cols + numerical_cols
+X_train = X_train_full[my_cols].copy()
+X_valid = X_valid_full[my_cols].copy()
+X_test = X_test_full[my_cols].copy()
+
+#### ここから本番
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_absolute_error
+
+# ①Preprocessing for numerical data
+# 数値列の欠損値補完用のSimpleImputer(定数埋め)
+numerical_transformer = SimpleImputer(strategy='constant')
+
+# ②Preprocessing for categorical data
+# カテゴリ変数用のPipline
+#  └ SimpleImputer(最頻値で埋める)
+#  └ OneHotEncoder(fit時にない値が登場した場合は無視するモード)
+categorical_transformer = Pipeline(steps=[
+    ('imputer', SimpleImputer(strategy='most_frequent')),
+    ('onehot', OneHotEncoder(handle_unknown='ignore'))
+])
+
+# Bundle preprocessing for numerical and categorical data
+# ③ColumsTransformersでバンドル
+# └ ①数値列の欠損値補完用のSimpleImputer …前手順で抽出した数値列群が適用ターゲット
+# └ ②カテゴリ変数用のPipline…前手順で抽出したカテゴリ列群が適用ターゲット
+# ※ColumnTransformerを使うと、列ごと（特徴量ごと）に異なった操作を適用するという変換を行うことができます
+preprocessor = ColumnTransformer(
+    transformers=[
+        ('num', numerical_transformer, numerical_cols),
+        ('cat', categorical_transformer, categorical_cols)
+    ])
+
+# Define model
+# ④いつものランダムフォレスト
+model = RandomForestRegressor(n_estimators=100, random_state=0)
+
+# Bundle preprocessing and modeling code in a pipeline
+# ⑤Pipelineでバンドル
+# └ ③ColumsTransformers
+# └ ④モデル
+clf = Pipeline(steps=[('preprocessor', preprocessor),
+                      ('model', model)
+                     ])
+
+# Preprocessing of training data, fit model 
+# ⑥⑤Pipelineで前処理＆学習
+clf.fit(X_train, y_train)
+
+# Preprocessing of validation data, get predictions
+# ⑦検証データでpredict
+preds = clf.predict(X_valid)
+
+print('MAE:', mean_absolute_error(y_valid, preds))
+
+
+¶ 5 cross-validation 交差検証
+モデルのパフォーマンスをより良く測定する交差検証。
+
+ホールドアウト検証（訓練データを学習用と検証用に分ける、7:3とか）では、
+偏りがあった場合にモデルが悪くなってしまう。
+ので交差検証は有用。
+
+ただし、常にとにかく交差検証すればいいというわけでもなく検討は必要。
+・データがあまり多くない場合
+・データに偏りがある場合(時間経過で後ろのほうが精度が悪いとか)
+・ホールドアウトだと解析がすぐに終わる場合(⇔クロスアウトに切り替えると時間がかかる)
+
+
+＞前説
+機械学習は反復的なプロセスです。
+
+どのような予測変数を使用するか、
+どのようなタイプのモデルを使用するか、
+それらのモデルにどのような引数を提供するかなどの選択に直面するでしょう。
+これまでのところ、検証（またはホールドアウト）セットでモデルの品質を測定することで、
+データ駆動型の方法でこれらの選択をしてきました。
+※ホールドアウト検証…訓練データを学習用と検証用に分ける。
+
+しかし、このアプローチにはいくつかの欠点があります。
+これを見るために、5000行のデータセットがあるとします。
+通常、データの約20%を検証用データセット、つまり1000行のデータセットとして保存します。
+しかし、これでは、モデルのスコアを決定する際にランダムな偶然性が残ります。つまり、モデルが1000行のあるセットではうまくいくかもしれないが、別の1000行では不正確になるかもしれないということです。
+
+極端に言えば、検証セットに1行だけのデータがあることを想像することができます。
+代替モデルを比較した場合、1つのデータポイントでどのモデルが最も良い予測をするかは、ほとんどが運の問題になります。
+
+一般的に、検証セットが大きければ大きいほど、
+モデルの品質を測る際のランダム性（別名「ノイズ」）が少なくなり、信頼性が高くなります。
+残念ながら、トレーニングデータから行を削除することでしか大きなバリデーションセットを得ることができません。
+
+＞クロスバリデーションとは何ですか？
+クロス・バリデーションでは、モデル品質の複数の尺度を得るために、
+データの異なるサブセットでモデリング・プロセスを実行する。
+
+例えば、データを5つの部分に分割することから始めることができます。
+この場合、データを5つの「折り目」に分割したとします。
+
+そして、各折り畳みについて1つの実験を実行します。
+
+実験1では、最初のフォールドを検証（またはホールドアウト）セットとして使用し、それ以外のすべてを学習データとして使用します。これにより、20%のホールドアウト・セットに基づいたモデル品質の尺度が得られる。
+
+実験2では、2つ目のフォールドのデータをホールドアウトする（2つ目のフォールド以外はすべてモデルの学習に使う）。実験2では、2つ目のフォールドからのデータをホールドアウトする（モデルの学習には2つ目のフォールド以外のデータを使用する）。
+
+このプロセスを繰り返し、すべてのフォールドを一度だけホールドアウト集合として使用する。これをまとめると、ある時点でデータの100%がホールドアウトとして使用され、データセット内のすべての行に基づいたモデル品質の尺度が得られます（すべての行を同時に使用しなくても）。
+
+＞クロス・バリデーションはいつ使用すべきか？
+クロス・バリデーションは、モデルの品質をより正確に測定できるので、多くのモデリング決定を行っている場合に特に重要である。しかし、複数のモデル（フォールドごとに1つ）を推定するため、実行に時間がかかることがあります。
+
+では、これらのトレードオフを考えると、どのような場合にそれぞれのアプローチを使用すべきなのでしょうか？
+余分な計算負荷が大したことない小さなデータセットでは、クロスバリデーションを実行すべきである。
+
+大規模なデータセットでは、単一の検証セットで十分である。 あなたのコードはより速く実行され、ホールドアウトのためにデータの一部を再利用する必要がほとんどないほど十分なデータを持っているかもしれません。
+
+何が大規模なデータセットと小規模なデータセットを構成するかの単純なしきい値はありません。しかし、モデルの実行に数分かそれ以下かかる場合、クロス・バリデーションに切り替える価値があるかもしれません。
+
+あるいは、クロス・バリデーションを実行して、各実験のスコアが近いように見えるかどうかを見ることができます。各実験で同じ結果が得られるなら、1つの検証セットで十分でしょう。
+
+>実装
+欠損値を埋めるためのインピュータと、
+予測を行うためのランダムフォレストモデルを用いたパイプラインを定義します。
+
+パイプラインなしでクロスバリデーションを行うことは可能ですが、
+それは非常に困難です。パイプラインを使用すると、コードは非常に簡単になります。
+
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+
+# 欠損値を埋めるimputerとモデルをパイプラインでバンドル。
+my_pipeline = Pipeline(steps=[('preprocessor', SimpleImputer()),
+                              ('model', RandomForestRegressor(n_estimators=50, random_state=0))
+                             ])
+
+scikit-learn の cross_val_score() 関数を用いて，
+クロスバリデーションのスコアを取得します．cvパラメータでホールド数(分割数)を設定します．
+
+from sklearn.model_selection import cross_val_score
+
+# Multiply by -1 since sklearn calculates *negative* MAE
+scores = -1 * cross_val_score(my_pipeline, X, y,
+                              cv=5,
+                              scoring='neg_mean_absolute_error')
+
+print("MAE scores:\n", scores)
+
+>MAE scores:
+ >[301628.7893587  303164.4782723  287298.331666   236061.84754543 260383.45111427]
+
+スコアリング・パラメータは、レポートするモデルの品質の尺度を選択します
+: ここでは、負の平均絶対誤差(MAE)を選択しました。
+scikit-learnのドキュメントにはオプションのリストがあります。
+
+負のMAEを指定しているのは少し驚きです。
+scikit-learnでは、すべてのメトリクスが定義されているので、高い数値が良いとされています。
+負のMAEは他の場所ではほとんど聞いたことがありませんが、
+ここでは負のMAEを使うことで、その慣習に従うことができます。
+
+我々は通常、代替モデルを比較するために、
+モデルの品質の単一の尺度が欲しいと考えています。そこで、我々は実験全体の平均を取ります。
+
+print("Average MAE score (across experiments):")
+print(scores.mean())
+>Average MAE score (across experiments):
+>277707.3795913405
+
+>結論
+クロスバリデーションを使用することで、モデルの品質をより良く測定することができ、
+コードをクリーンアップするという付加的な利点があります
+：学習セットと検証セットを別々に追跡する必要がなくなることに注意してください。
+したがって、特に小さなデータセットの場合は、良い改善になります。
+
+n_estimators：多数決に使う決定木の個数
+
